@@ -81,26 +81,33 @@ class MaskedAutoencoderViT(nn.Module):
     
     def compute_bt_loss_per_image(self, latent):
         B, N, d = latent.shape
+
         bt_losses = []
         for z_img in latent:
-            z_img = F.normalize(z_img, dim=-1)
+            z_tokens = z_img[1:]
+            z_img = F.normalize(z_tokens, dim=-1)
             z_img = (z_img - z_img.mean(0)) / (z_img.std(0) + 1e-6)
+
             c = (z_img.T @ z_img) / N
             on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
             off_diag = off_diagonal(c).pow_(2).sum()
+
             bt_losses.append(on_diag + self.bt_lambda * off_diag)
+
         return torch.stack(bt_losses).mean()
 
     def compute_bt_loss_per_batch(self, latent):
         B, N, d = latent.shape
-        z_global = latent.reshape(B * N, d)
+
+        z_global = latent[:, 1:, :].reshape(B * (N - 1), d)
         z_global = F.normalize(z_global, dim=-1)
         z_global = (z_global - z_global.mean(0)) / (z_global.std(0) + 1e-6)
 
-        c = (z_global.T @ z_global) / (B * N)
-        c = torch.clamp(c, -1.0, 1.0)
+        c = (z_global.T @ z_global) / z_global.shape[0]
+        # c = torch.clamp(c, -1.0, 1.0)
         on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
         off_diag = off_diagonal(c).pow_(2).sum()
+
         return on_diag + self.bt_lambda * off_diag
 
     def initialize_weights(self):

@@ -65,9 +65,7 @@ def train_one_epoch(model: torch.nn.Module,
             
             loss_ce = torch.nn.functional.cross_entropy(outputs, targets)
 
-        loss = loss_mae + args.lamb * loss_reg + loss_ce
-        if bt_loss is not None:
-            loss = loss + bt_loss
+        loss = out_dict["loss"] + args.lamb * loss_reg + loss_ce
 
         loss_mae_value = loss_mae.item()
         loss_reg_value = loss_reg.item()

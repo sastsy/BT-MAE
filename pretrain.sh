@@ -1,4 +1,3 @@
-IMAGENET_DIR="/home/jovyan/shares/SR004.nfs2/aitsybina/data/data/ilee0022___image_net100"
 EXP_NAME="8gpu_per_batch_mae_pretrain_SMI"
 
 torchrun --nproc_per_node=8 /home/jovyan/shares/SR004.nfs2/aitsybina/reps/malvina-assessor-mfu/main_pretrain.py \
@@ -9,7 +8,6 @@ torchrun --nproc_per_node=8 /home/jovyan/shares/SR004.nfs2/aitsybina/reps/malvin
     --epochs 200 \
     --warmup_epochs 40 \
     --blr 1.5e-4 --weight_decay 0.05 \
-    --data_path ${IMAGENET_DIR}\
     --use_hf_dataset \
     --lamb 0.00 \
     --reg none \

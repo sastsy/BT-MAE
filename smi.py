@@ -349,13 +349,10 @@ def compute_and_log_mi(
     for samples, _ in tqdm(data_loader, desc=f"Collecting MI embeddings (epoch {epoch})"):
         samples = samples.to(device, non_blocking=True)
 
-        # two random masks for the same images (NOTE: now works with random masks)
-        # mask1 = mask1_fixed.expand(samples.shape[0], -1)
-        # mask2 = mask2_fixed.expand(samples.shape[0], -1)
-
         with torch.no_grad():
-            emb1 = model(samples, mask_ratio=args.mask_ratio)["cls_feats"]
-            emb2 = model(samples, mask_ratio=args.mask_ratio)["cls_feats"]
+            # mi_view arg is for fixing the mask
+            emb1 = model(samples, mask_ratio=args.mask_ratio, mi_view=1)["cls_feats"]
+            emb2 = model(samples, mask_ratio=args.mask_ratio, mi_view=2)["cls_feats"]
 
         emb1_pool = emb1.detach().cpu()
         emb2_pool = emb2.detach().cpu()

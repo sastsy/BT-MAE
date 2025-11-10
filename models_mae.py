@@ -78,6 +78,24 @@ class MaskedAutoencoderViT(nn.Module):
         self.bt_variant = bt_variant
         self.bt_lambda = bt_lambda
         self.bt_weight = bt_weight
+
+        self.fixed_mask1, self.fixed_ids_restore1 = self._make_fixed_mask()
+        self.fixed_mask2, self.fixed_ids_restore2 = self._make_fixed_mask()
+    
+    def _make_fixed_mask(self):
+        L = self.patch_embed.num_patches
+        len_keep = int(L * (1 - 0.75))
+        noise = torch.rand(L)
+
+        ids_shuffle = torch.argsort(noise)
+        ids_restore = torch.argsort(ids_shuffle)
+
+        mask = torch.ones(L)
+        mask[:len_keep] = 0
+
+        mask = mask[ids_restore]
+
+        return mask, ids_restore
     
     def compute_bt_loss_per_image(self, latent):
         B, N, d = latent.shape
@@ -195,21 +213,20 @@ class MaskedAutoencoderViT(nn.Module):
 
         return x_masked, mask, ids_restore
 
-    def forward_encoder(self, x, mask_ratio, mask=None):
+    def forward_encoder(self, x, mask_ratio, mask=None, ids_restore=None):
         # embed patches
         x = self.patch_embed(x)
 
         # add pos embed w/o cls token
         x = x + self.pos_embed[:, 1:, :]
-
-        # masking: length -> length * mask_ratio
+        
         if mask is None:
+            # masking: length -> length * mask_ratio
             x, mask, ids_restore = self.random_masking(x, mask_ratio)
         else:
-            _, _, D = x.shape
+            N, L, D = x.shape
             len_keep = (mask == 0).sum(dim=1).min().item()
             ids_keep = torch.argsort(mask, dim=1)[:, :len_keep]
-            ids_restore = torch.argsort(torch.argsort(mask, dim=1))
             x = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
 
         # append cls token
@@ -268,8 +285,23 @@ class MaskedAutoencoderViT(nn.Module):
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
 
-    def forward(self, imgs, mask_ratio=0.75, mask=None):
-        latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio, mask=mask)
+    def forward(self, imgs, mask_ratio=0.75, mask=None, mi_view=None):
+        if mi_view is not None:
+            if mi_view == 1:
+                mask = self.fixed_mask1.to(imgs.device).expand(imgs.size(0), -1)
+                ids_restore = self.fixed_ids_restore1.to(imgs.device).expand(imgs.size(0), -1)
+            elif mi_view == 2:
+                mask = self.fixed_mask2.to(imgs.device).expand(imgs.size(0), -1)
+                ids_restore = self.fixed_ids_restore2.to(imgs.device).expand(imgs.size(0), -1)
+            else:
+                raise ValueError("mi_view must be 1, 2, or None")
+
+            latent, _, _ = self.forward_encoder(imgs, mask_ratio, mask=mask)
+            # override ids_restore after forward_encoder:
+            ids_restore = ids_restore
+        else:
+            latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio, mask=mask)
+
         pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
         mae_loss = self.forward_loss(imgs, pred, mask)
         

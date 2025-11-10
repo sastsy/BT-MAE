@@ -1,4 +1,4 @@
-EXP_NAME="8gpu_per_batch_mae_pretrain_SMI"
+EXP_NAME="per_batch_mae_pretrain_SMI_fixed_masking"
 
 torchrun --nproc_per_node=8 /home/jovyan/shares/SR004.nfs2/aitsybina/reps/malvina-assessor-mfu/main_pretrain.py \
     --batch_size 128 \

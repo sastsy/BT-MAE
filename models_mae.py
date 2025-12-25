@@ -14,10 +14,12 @@ from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 
 from timm.models.vision_transformer import PatchEmbed, Block
 
 from util.pos_embed import get_2d_sincos_pos_embed
+from loss_func import GatherLayer
 
 
 def off_diagonal(x):
@@ -33,8 +35,8 @@ class MaskedAutoencoderViT(nn.Module):
                  embed_dim=1024, depth=24, num_heads=16,
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False,
-                 global_pool=False, num_classes=1000,
-                 bt_variant=None, bt_lambda=0.005, bt_weight=0.05):
+                 global_pool=False, num_classes=100,
+                 bt_variant=None, bt_lambda=0.005, bt_weight=0.05, gather_layer=False):
         super().__init__()
 
         # --------------------------------------------------------------------------
@@ -78,36 +80,62 @@ class MaskedAutoencoderViT(nn.Module):
         self.bt_variant = bt_variant
         self.bt_lambda = bt_lambda
         self.bt_weight = bt_weight
+        self.gather_layer = gather_layer
         
         self.fixed_mask1, self.fixed_ids_restore1, \
         self.fixed_mask2, self.fixed_ids_restore2 = self._make_two_orthogonal_masks()
-    
+        
     def _make_two_orthogonal_masks(self):
         L = self.patch_embed.num_patches
-        len_keep = int(L * (1 - 0.75))
+        len_keep = int(L * (1 - 0.75))  # ratio = 0.25 keep
 
+        # One random shuffle for both masks
         noise = torch.rand(L)
         ids_sorted = torch.argsort(noise)
 
-        # two disjoint sets
+        # Split into two disjoint sets
         ids_keep_1 = ids_sorted[:len_keep]
-        ids_keep_2 = ids_sorted[len_keep:2*len_keep]
+        ids_keep_2 = ids_sorted[len_keep:2*len_keep]  # next chunk, guaranteed disjoint
 
-        # --- mask1 ---
+        # --- Build mask1 ---
         mask1 = torch.ones(L)
         mask1[ids_keep_1] = 0
-        ids_restore1 = torch.argsort(torch.argsort(noise))
+
+        ids_restore1 = torch.argsort(torch.argsort(noise))  # same restore order
 
         mask1 = mask1[ids_restore1]
 
-        # --- mask2 ---
+        # --- Build mask2 ---
         mask2 = torch.ones(L)
         mask2[ids_keep_2] = 0
-        ids_restore2 = ids_restore1.clone()
+
+        ids_restore2 = ids_restore1.clone()  # same reorder
 
         mask2 = mask2[ids_restore2]
 
         return mask1, ids_restore1, mask2, ids_restore2
+    
+    def make_orthogonal_masks(self, N, L, len_keep, device):
+        """
+        Returns:
+            mask1, ids_restore1
+            mask2, ids_restore2
+        """
+
+        noise = torch.rand(N, L, device=device)
+        ids_shuffle = torch.argsort(noise, dim=1)
+        ids_restore = torch.argsort(ids_shuffle, dim=1)
+
+        ids_keep1 = ids_shuffle[:, :len_keep]
+        ids_keep2 = ids_shuffle[:, len_keep:2 * len_keep]
+
+        mask1 = torch.ones(N, L, device=device)
+        mask2 = torch.ones(N, L, device=device)
+
+        mask1.scatter_(1, ids_keep1, 0)
+        mask2.scatter_(1, ids_keep2, 0)
+
+        return mask1, ids_restore, mask2, ids_restore
     
     def compute_bt_loss_per_image(self, latent):
         B, N, d = latent.shape
@@ -117,10 +145,11 @@ class MaskedAutoencoderViT(nn.Module):
         off_diags = []
         for z_img in latent:
             z_tokens = z_img[1:]
-            z_img = F.normalize(z_tokens, dim=-1)
             z_img = (z_img - z_img.mean(0)) / (z_img.std(0) + 1e-6)
+            
+            num_samples = z_tokens.shape[0]
 
-            c = (z_img.T @ z_img) / N
+            c = (z_img.T @ z_img) / num_samples
             on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
             off_diag = off_diagonal(c).pow_(2).sum()
 
@@ -138,18 +167,134 @@ class MaskedAutoencoderViT(nn.Module):
     def compute_bt_loss_per_batch(self, latent):
         B, N, d = latent.shape
 
-        z_global = latent[:, 1:, :].reshape(B * (N - 1), d)
-        z_global = F.normalize(z_global, dim=-1)
+        z = latent[:, 1:, :].reshape(B * (N - 1), d)
+        if self.gather_layer:
+            if dist.is_initialized() and dist.get_world_size() > 1:
+                z_global = torch.cat(GatherLayer.apply(z), dim=0)
+        else:
+            z_global = z
+
+        # z_global = F.normalize(z_global, dim=-1)
         z_global = (z_global - z_global.mean(0)) / (z_global.std(0) + 1e-6)
 
         c = (z_global.T @ z_global) / z_global.shape[0]
-        # c = torch.clamp(c, -1.0, 1.0)
-        on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
-        off_diag = off_diagonal(c).pow_(2).sum()
+        on_diag = torch.diagonal(c).add_(-1).pow_(2).mean()
+        off_diag = off_diagonal(c).pow_(2).mean()
         
         bt_loss = on_diag + self.bt_lambda * off_diag
 
         return bt_loss, on_diag, off_diag
+    
+    def compute_bt_loss_cls(self, cls_feats):
+        if self.gather_layer:
+            if dist.is_initialized() and dist.get_world_size() > 1:
+                cls_feats = torch.cat(GatherLayer.apply(cls_feats), dim=0)
+    
+        # cls_feats = F.normalize(cls_feats, dim=-1)
+        cls_feats = (cls_feats - cls_feats.mean(0)) / (cls_feats.std(0) + 1e-5)
+
+        B, D = cls_feats.shape
+        c = (cls_feats.T @ cls_feats) / B
+
+        on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+        off_diag = off_diagonal(c).pow_(2).sum()
+
+        bt_loss = on_diag + self.bt_lambda * off_diag
+        return bt_loss, on_diag, off_diag
+    
+    def compute_bt_loss_cross(self, z1, z2):
+        z1_flat = z1[:, 1:, :].reshape(-1, z1.shape[-1])
+        z2_flat = z2[:, 1:, :].reshape(-1, z2.shape[-1])
+        
+        if self.gather_layer:
+            if dist.is_initialized() and dist.get_world_size() > 1:
+                z1_flat = torch.cat(GatherLayer.apply(z1_flat), dim=0)
+                z2_flat = torch.cat(GatherLayer.apply(z2_flat), dim=0)
+
+        z1_norm = (z1_flat - z1_flat.mean(0)) / (z1_flat.std(0) + 1e-5)
+        z2_norm = (z2_flat - z2_flat.mean(0)) / (z2_flat.std(0) + 1e-5)
+
+        num_samples = z1_norm.shape[0]
+        c = (z1_norm.T @ z2_norm) / num_samples
+
+        on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+        
+        off_diag = (c - torch.diag(torch.diagonal(c))).pow(2).sum()
+
+        bt_loss = on_diag + self.bt_lambda * off_diag
+        
+        return bt_loss, on_diag, off_diag
+    
+    def compute_bt_loss_cross_cls(self, cls1, cls2):
+        """
+        cls1, cls2: [B, D] CLS features from two views
+        """
+        if self.gather_layer:
+            if dist.is_initialized() and dist.get_world_size() > 1:
+                cls1 = torch.cat(GatherLayer.apply(cls1), dim=0)
+                cls2 = torch.cat(GatherLayer.apply(cls2), dim=0)
+
+        cls1 = (cls1 - cls1.mean(0)) / (cls1.std(0) + 1e-5)
+        cls2 = (cls2 - cls2.mean(0)) / (cls2.std(0) + 1e-5)
+
+        B, D = cls1.shape
+        c = (cls1.T @ cls2) / B
+
+        on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+        off_diag = off_diagonal(c).pow_(2).sum()
+
+        bt_loss = on_diag + self.bt_lambda * off_diag
+        return bt_loss, on_diag, off_diag
+    
+    def _get_masks(self, imgs, mask_ratio, mi_view=None, two_views=False):
+        device = imgs.device
+        N = imgs.size(0)
+
+        if mi_view is not None:
+            if mi_view == 1:
+                mask = self.fixed_mask1.to(device).expand(N, -1)
+                ids_restore = self.fixed_ids_restore1.to(device).expand(N, -1)
+            elif mi_view == 2:
+                mask = self.fixed_mask2.to(device).expand(N, -1)
+                ids_restore = self.fixed_ids_restore2.to(device).expand(N, -1)
+            else:
+                raise ValueError("mi_view must be 1, 2 or None")
+            return [(mask, ids_restore)]
+
+        if two_views:
+            # build orthogonal masks
+            with torch.no_grad():
+                _, mask1, _ = self.forward_encoder(imgs, mask_ratio)
+                N, L = mask1.shape
+                len_keep = int((mask1 == 0).sum(dim=1).min().item())
+
+            return self.make_orthogonal_masks(N, L, len_keep, device)
+
+        return [(None, None)]
+    
+    def _encode_view(self, imgs, mask_ratio, mask, ids_restore):
+        latent, used_mask, used_ids_restore = self.forward_encoder(
+            imgs, mask_ratio, mask=mask, ids_restore=ids_restore
+        )
+        return latent, used_mask, used_ids_restore
+    
+    def _compute_bt(self, latent1, latent2=None, cls1=None, cls2=None):
+        if self.bt_variant == "per_image":
+            return self.compute_bt_loss_per_image(latent1)
+
+        if self.bt_variant == "per_batch":
+            return self.compute_bt_loss_per_batch(latent1)
+
+        if self.bt_variant == "cls":
+            return self.compute_bt_loss_cls(cls1)
+
+        if self.bt_variant == "cls_cross":
+            return self.compute_bt_loss_cross_cls(cls1, cls2)
+
+        if self.bt_variant == "per_image_cross":
+            return self.compute_bt_loss_cross(latent1, latent2)
+
+        return None, None, None
 
     def initialize_weights(self):
         # initialization
@@ -309,43 +454,46 @@ class MaskedAutoencoderViT(nn.Module):
         return loss
 
     def forward(self, imgs, mask_ratio=0.75, mask=None, mi_view=None):
-        if mi_view is not None:
-            if mi_view == 1:
-                mask = self.fixed_mask1.to(imgs.device).expand(imgs.size(0), -1)
-                ids_restore = self.fixed_ids_restore1.to(imgs.device).expand(imgs.size(0), -1)
-            elif mi_view == 2:
-                mask = self.fixed_mask2.to(imgs.device).expand(imgs.size(0), -1)
-                ids_restore = self.fixed_ids_restore2.to(imgs.device).expand(imgs.size(0), -1)
-            else:
-                raise ValueError("mi_view must be 1, 2, or None")
+        two_views = self.bt_variant in {"cls_cross", "per_image_cross"} and mi_view is None
 
-            latent, _, _ = self.forward_encoder(imgs, mask_ratio, mask=mask)
-            # override ids_restore after forward_encoder:
-            ids_restore = ids_restore
+        masks = self._get_masks(imgs, mask_ratio, mi_view=mi_view, two_views=two_views)
+
+        if two_views:
+            mask1, ids_restore1, mask2, ids_restore2 = masks
+            latent1, _, _ = self._encode_view(imgs, mask_ratio, mask1, ids_restore1)
+            latent2, _, _ = self._encode_view(imgs, mask_ratio, mask2, ids_restore2)
         else:
-            latent, mask, ids_restore = self.forward_encoder(imgs, mask_ratio, mask=mask)
+            (mask1, ids_restore1), = masks
+            latent1, mask1, ids_restore1 = self._encode_view(
+                imgs, mask_ratio, mask1, ids_restore1
+            )
+            latent2 = None
 
-        pred = self.forward_decoder(latent, ids_restore)  # [N, L, p*p*3]
-        mae_loss = self.forward_loss(imgs, pred, mask)
-        
+        pred = self.forward_decoder(latent1, ids_restore1)
+        mae_loss = self.forward_loss(imgs, pred, mask1)
+
+        if self.global_pool:
+            cls1 = latent1[:, 1:, :].mean(dim=1)
+            cls1 = self.fc_norm(cls1)
+            cls2 = (
+                self.fc_norm(latent2[:, 1:, :].mean(dim=1))
+                if latent2 is not None else None
+            )
+        else:
+            cls1 = latent1[:, 0]
+            cls2 = latent2[:, 0] if latent2 is not None else None
+
+        outputs = self.fc(cls1.detach())
+
         bt_loss = None
         on_diag = None
         off_diag = None
-        if self.bt_variant == "per_image":
-            bt_loss, on_diag, off_diag = self.compute_bt_loss_per_image(latent)
-        elif self.bt_variant == "per_batch":
-            bt_loss, on_diag, off_diag = self.compute_bt_loss_per_batch(latent)
+        if mi_view is None:
+            bt_loss, on_diag, off_diag = self._compute_bt(
+                latent1, latent2, cls1, cls2
+            )
 
         total_loss = mae_loss + (self.bt_weight * bt_loss if bt_loss is not None else 0.0)
-        
-        # get cls feature
-        if self.global_pool:
-            cls_feats = latent[:, 1:, :].mean(dim=1)  # global pool without cls token
-            cls_feats = self.fc_norm(cls_feats)
-        else:
-            cls_feats = self.norm(latent)
-            cls_feats = cls_feats[:, 0]
-        outputs = self.fc(cls_feats.detach())
 
         return {
             "loss": total_loss,
@@ -354,10 +502,11 @@ class MaskedAutoencoderViT(nn.Module):
             "on_diag": on_diag,
             "off_diag": off_diag,
             "pred": pred,
-            "mask": mask,
-            "cls_feats": cls_feats,
+            "mask": mask1,
+            "cls_feats": cls1,
             "outputs": outputs,
         }
+
 
 
 def mae_vit_base_patch16_dec512d8b(**kwargs):

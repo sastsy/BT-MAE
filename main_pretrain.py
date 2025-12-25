@@ -168,6 +168,12 @@ def get_args_parser():
     
     parser.add_argument('--use_hf_dataset', action='store_true',
                     help='Use Hugging Face dataset instead of ImageFolder')
+    
+    parser.add_argument('--global_pool', action='store_true',
+                        help='Use (per-patch) normalized pixels as targets for computing loss')
+    
+    parser.add_argument('--gather_layer', action='store_true',
+                        help='Use GatherLayer for BT loss computation')
 
     return parser
 
@@ -200,8 +206,8 @@ def main(args):
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
     
     if args.use_hf_dataset:
-        ds_train_train = load_dataset("ilee0022/ImageNet100", split='train')
-        ds_train_val = load_dataset("ilee0022/ImageNet100", split='validation')
+        ds_train_train = load_dataset("ilee0022/ImageNet100", split='train', cache_dir="/home/jovyan/shares/SR004.nfs2/aitsybina/data")
+        ds_train_val = load_dataset("ilee0022/ImageNet100", split='validation', cache_dir="/home/jovyan/shares/SR004.nfs2/aitsybina/data")
         
         ds_train = concatenate_datasets([ds_train_train, ds_train_val])
         ds_val = load_dataset("ilee0022/ImageNet100", split='test')
@@ -265,6 +271,8 @@ def main(args):
         bt_variant=args.bt_variant,
         bt_weight=args.bt_weight,
         bt_lambda=args.bt_lambda,
+        global_pool=args.global_pool,
+        gather_layer=args.gather_layer,
     )
     print(f"BT variant: {model.bt_variant}, weight: {model.bt_weight}, lambda: {model.bt_lambda}")
 
@@ -342,7 +350,7 @@ def main(args):
                 loss_scaler=loss_scaler, epoch=epoch)
 
         if epoch % args.val_interval == 0:
-            test_stats = evaluate(data_loader_val, model, device)
+            test_stats = evaluate(data_loader_val, model, device, is_pretrain=True)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         max_accuracy = max(max_accuracy, test_stats["acc1"])
         print(f'Max accuracy: {max_accuracy:.2f}%')

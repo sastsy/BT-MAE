@@ -1,34 +1,85 @@
-# U-MAE (Uniformity-enhanced Masked Autoencoder)
+# BT-MAE (Barlow-Twins Masked Autoencoder)
 
-This repository includes a PyTorch implementation of the NeurIPS 2022 paper [How Mask Matters: Towards Theoretical Understandings of Masked Autoencoders](https://arxiv.org/pdf/2210.08344.pdf) authored by Qi Zhang*, [Yifei Wang*](https://yifeiwang77.github.io/), and [Yisen Wang](https://yisenwang.github.io/).
+This repository includes a PyTorch implementation of BT-MAE, based on the repositories of the original [MAE](https://github.com/facebookresearch/mae) implementation and [U-MAE](https://github.com/zhangq327/U-MAE) implementation, which introduced a linear classifier to monitor online linear accuracy. 
 
-U-MAE is an extension of [MAE (He et al., 2022)](https://arxiv.org/pdf/2111.06377.pdf) by further encouraging the feature uniformity of MAE. As shown below, U-MAE successfully addresses the dimensional feature collapse issue of MAE.
-
-<p align="center">
-  <img src="https://user-images.githubusercontent.com/16850758/195980285-48985231-fc68-40a1-b2d3-81462c5f868a.png" width="1000">
-</p>
-
+BT-MAE is an extension of [MAE (He et al., 2022)](https://arxiv.org/pdf/2111.06377.pdf) by further encouraging the feature decorrelation of MAE.
 
 ## Instructions
-This repo is based on the [official code of MAE](https://github.com/facebookresearch/mae) with minor modifications below, and we follow all the default training and evaluation configurations of MAE. Please see their instructions [README_mae.md](README_mae.md) for details.
+We follow all the default training and evaluation configurations of MAE. Please see their instructions [README_mae.md](README_mae.md) for details.
 
-**Main differences.** In U-MAE, we introduce a ``uniformity_loss``  (implemented in ``loss_func.py``) as a uniformity regularization to the MAE loss. It also introduces an additional hyper-parameter ``lamb`` (default to ``1e-2``) in ``pretrain.sh``, which represents the coefficient of the uniformity regularization in the U-MAE loss. 
+**Main differences.** In BT-MAE, we introduce a ``bt_loss``  (implemented in ``models_mae.py``) as a decorrelating regularization to the MAE loss. It also introduces additional hyper-parameters ``bt_weight`` and ``bt_lambda`` in ``pretrain.sh``, which represent the coefficient of the Barlow-Twins regularization in the BT-MAE loss and ``lambda`` coefficient from original Barlow-Twins algorithm. 
 
-**Minor points:**
-1. We add a linear classifier to monitor the online linear accuracy and its gradient will not be backpropagated to the backbone encoder.
-2. For efficiency, we only train U-MAE for 200 epochs, and accordingly, we adopt 20 warmup epochs.
+## Training BT-MAE
 
-## Citing this work
-If you find the work useful, please cite the accompanying paper:
+To launch pretraining, the ``pretrain.sh`` script could be used:
+
 ```
-@inproceedings{zhang2022how,
-  title={How Mask Matters: Towards Theoretical Understandings of Masked Autoencoders},
-  author={Zhang, Qi and Wang, Yifei and Wang, Yisen},
-  booktitle={NeurIPS},
-  year={2022}
-}
+EXP_NAME="bt_mae_pretrain"
+
+torchrun --nproc_per_node=8 main_pretrain.py \
+    --batch_size 128 \
+    --model mae_vit_base_patch16 \
+    --norm_pix_loss \
+    --mask_ratio 0.75 \
+    --epochs 200 \
+    --warmup_epochs 40 \
+    --blr 1.5e-4 --weight_decay 0.05 \
+    --use_hf_dataset \
+    --lamb 0.00 \
+    --reg none \
+    --output_dir path/to/your/output/dir/$EXP_NAME \
+    --log_dir path/to/your/logdir/$EXP_NAME \
+    --bt_variant per_batch \
+    --bt_weight 0.005 \
+    --bt_lambda 0.0005
 ```
 
-## Acknowledgement
+The ``bt_variant`` can be chosen from the list below. Note that each variant requires tuning the ``bt_weight`` and ``bt_lambda`` hyper-parameters.
 
-Our code follows the official implementations of MAE (https://github.com/facebookresearch/mae).
+To launch linear probing after pretraining, the ``linprobe.sh`` script could be used:
+
+```
+EXP_NAME="bt_mae_linear_probe"
+
+OMP_NUM_THREADS=1 torchrun --nproc_per_node=8 main_linprobe.py \
+    --accum_iter 4 \
+    --batch_size 256 \
+    --model vit_base_patch16 --cls_token\
+    --finetune /path/to/your/checkpoint/checkpoint-199.pth \
+    --epochs 90 \
+    --blr 0.1  \
+    --weight_decay 0.0 \
+    --log_dir /path/to/your/logdir \
+    --dist_eval --data_path data \
+    --use_hf_dataset \
+    --nb_classes 100 \
+    --output_dir /path/to/your/output/dir/$EXP_NAME \
+
+```
+
+**Barlow-Twins variants:**
+There are several variants of applying Barlow-Twins for feature decorrelation:
+1. ``per_image``
+
+Applies Barlow-Twins *independently per image*.
+For each image, the cross-correlation matrix is computed across its patch tokens, encouraging decorrelation between tokens within the same image. Loss is averaged over the batch.
+
+2. ``per_batch``
+
+Applies Barlow-Twins *across the full batch of patch tokens*.
+All patch tokens from all images are pooled (optionally across GPUs) and used to compute a single cross-correlation matrix, encouraging global feature decorrelation.
+
+3. ``cls``
+
+Applies Barlow-Twins on *CLS (or pooled) features only*.
+The loss is computed across the batch using the global image representation, promoting decorrelated dimensions in the final image-level embedding.
+
+4. ``cls_cross``
+
+Cross-view Barlow-Twins on *CLS (or pooled) features from two views*.
+Uses two different masked views of the same images and enforces invariance and decorrelation between their global representations.
+
+5. ``per_image_cross``
+
+Cross-view Barlow-Twins on patch tokens.
+Patch tokens from two orthogonal masked views are matched, encouraging consistency and decorrelation between corresponding token representations across views.

@@ -1,6 +1,6 @@
-EXP_NAME="8gpu_fixed_data_and_masking_SMI_orig_mae_pretrain"
+EXP_NAME="bt_mae_pretrain"
 
-torchrun --nproc_per_node=8 /home/jovyan/shares/SR004.nfs2/aitsybina/reps/malvina-assessor-mfu/main_pretrain.py \
+torchrun --nproc_per_node=8 main_pretrain.py \
     --batch_size 128 \
     --model mae_vit_base_patch16 \
     --norm_pix_loss \
@@ -11,9 +11,8 @@ torchrun --nproc_per_node=8 /home/jovyan/shares/SR004.nfs2/aitsybina/reps/malvin
     --use_hf_dataset \
     --lamb 0.00 \
     --reg none \
-    --output_dir "/home/jovyan/shares/SR004.nfs2/aitsybina/reps/malvina-assessor-mfu/train_output/$EXP_NAME" \
-    --log_dir /home/jovyan/shares/SR004.nfs2/aitsybina/reps/malvina-assessor-mfu/train_logs/${EXP_NAME} \
+    --output_dir path/to/your/output/dir/$EXP_NAME \
+    --log_dir path/to/your/logdir/$EXP_NAME \
     --bt_variant per_batch \
     --bt_weight 0.005 \
-    --bt_lambda 0.005
-    # --distributed
+    --bt_lambda 0.0005

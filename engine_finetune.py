@@ -98,7 +98,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 
 @torch.no_grad()
-def evaluate(data_loader, model, device):
+def evaluate(data_loader, model, device, is_pretrain=False):
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = misc.MetricLogger(delimiter="  ")
@@ -116,15 +116,20 @@ def evaluate(data_loader, model, device):
         # compute output
         with torch.cuda.amp.autocast():
             output = model(images)
-            if isinstance(output, dict):
-                logits = output["output"]
+            if not is_pretrain:
+                if type(output) is tuple:
+                    output = output[-1]
+                loss = criterion(output, target)
             else:
-                logits = output
-            if type(logits) is tuple:
-                logits = logits[-1]
-            loss = criterion(logits, target)
-
-        acc1, acc5 = accuracy(logits, target, topk=(1, 5))
+                logits = output["outputs"]
+                if type(logits) is tuple:
+                    logits = logits[-1]
+                loss = criterion(logits, target)
+        
+        if is_pretrain:
+            acc1, acc5 = accuracy(logits, target, topk=(1, 5))
+        else:
+            acc1, acc5 = accuracy(output, target, topk=(1, 5))
         print(acc1, acc5)
 
         batch_size = images.shape[0]

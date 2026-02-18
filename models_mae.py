@@ -150,8 +150,9 @@ class MaskedAutoencoderViT(nn.Module):
         # random permutation per batch
         perm = torch.rand(B, K, device=tokens.device).argsort(dim=1)
 
+        # TODO: check num patches
         idx1 = perm[:, :K1]
-        idx2 = perm[:, K1:2*K1]
+        idx2 = perm[:, K1: 2 * K1]
 
         z1 = torch.gather(tokens, 1, idx1.unsqueeze(-1).expand(-1, -1, D))
         z2 = torch.gather(tokens, 1, idx2.unsqueeze(-1).expand(-1, -1, D))
@@ -161,7 +162,7 @@ class MaskedAutoencoderViT(nn.Module):
             torch.cat([cls_token, z2], dim=1),
         )
     
-    def compute_bt_loss_per_image(self, latent):
+    def compute_bt_loss_per_image(self, latent): # TODO: vectorize
         B, N, d = latent.shape
 
         bt_losses = []
@@ -366,7 +367,7 @@ class MaskedAutoencoderViT(nn.Module):
         if self.bt_variant == "cls_cross":
             return self.compute_bt_loss_cross_cls(cls1, cls2)
 
-        if self.bt_variant == "per_image_cross":
+        if self.bt_variant == "cross":
             return self.compute_bt_loss_cross(latent1, latent2)
         
         if self.bt_variant == "spatial":

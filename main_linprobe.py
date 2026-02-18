@@ -191,11 +191,11 @@ def main(args):
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
     if args.use_hf_dataset:
-        ds_train_train = load_dataset("ilee0022/ImageNet100", split='train')
-        ds_train_val = load_dataset("ilee0022/ImageNet100", split='validation')
+        ds_train_train = load_dataset("ilee0022/ImageNet100", split='train', cache_dir="/home/jovyan/shares/SR006.nfs2/aitsybina/data")
+        ds_train_val = load_dataset("ilee0022/ImageNet100", split='validation', cache_dir="/home/jovyan/shares/SR006.nfs2/aitsybina/data")
         
         ds_train = concatenate_datasets([ds_train_train, ds_train_val])
-        ds_val = load_dataset("ilee0022/ImageNet100", split='test')
+        ds_val = load_dataset("ilee0022/ImageNet100", split='test', cache_dir="/home/jovyan/shares/SR006.nfs2/aitsybina/data")
         
         dataset_train = HuggingFaceDataset(ds_train, transform=transform_train)
         dataset_val = HuggingFaceDataset(ds_val, transform=transform_val)

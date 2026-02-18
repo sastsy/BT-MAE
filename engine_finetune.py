@@ -117,7 +117,11 @@ def evaluate(data_loader, model, device):
         with torch.cuda.amp.autocast():
             output = model(images)
             if isinstance(output, dict):
-                logits = output["output"]
+                #logits = output["output"]
+                if "outputs" in output:
+                    logits = output["outputs"]
+                elif "output" in output:
+                    logits = output["output"]
             else:
                 logits = output
             if type(logits) is tuple:

@@ -137,6 +137,30 @@ class MaskedAutoencoderViT(nn.Module):
 
         return mask1, ids_restore, mask2, ids_restore
     
+    def split_visible_tokens(self, latent, ratio=0.5):
+        """
+        latent: [B, 1+K, D]  (output of MAE encoder)
+        """
+        cls_token = latent[:, :1, :]
+        tokens = latent[:, 1:, :]
+
+        B, K, D = tokens.shape
+        K1 = K // 2
+
+        # random permutation per batch
+        perm = torch.rand(B, K, device=tokens.device).argsort(dim=1)
+
+        idx1 = perm[:, :K1]
+        idx2 = perm[:, K1:2*K1]
+
+        z1 = torch.gather(tokens, 1, idx1.unsqueeze(-1).expand(-1, -1, D))
+        z2 = torch.gather(tokens, 1, idx2.unsqueeze(-1).expand(-1, -1, D))
+
+        return (
+            torch.cat([cls_token, z1], dim=1),
+            torch.cat([cls_token, z2], dim=1),
+        )
+    
     def compute_bt_loss_per_image(self, latent):
         B, N, d = latent.shape
 
@@ -144,19 +168,19 @@ class MaskedAutoencoderViT(nn.Module):
         on_diags = []
         off_diags = []
         for z_img in latent:
-            z_tokens = z_img[1:]
-            z_img = (z_img - z_img.mean(0)) / (z_img.std(0) + 1e-6)
+            z_tokens = z_img[1:] 
             
-            num_samples = z_tokens.shape[0]
+            z_norm = (z_tokens - z_tokens.mean(0)) / (z_tokens.std(0) + 1e-6)
+            
+            num_samples = z_norm.shape[0]
+            c = (z_norm.T @ z_norm) / num_samples
 
-            c = (z_img.T @ z_img) / num_samples
-            on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
-            off_diag = off_diagonal(c).pow_(2).sum()
-
-            on_diags.append(on_diag)
-            off_diags.append(off_diag)
+            on_diag = torch.diagonal(c).add_(-1).pow(2).sum()
+            off_diag = off_diagonal(c).pow(2).sum()
 
             bt_losses.append(on_diag + self.bt_lambda * off_diag)
+            on_diags.append(on_diag)
+            off_diags.append(off_diag)
         
         bt_loss = torch.stack(bt_losses).mean()
         on_diag_mean = torch.stack(on_diags).mean()
@@ -174,12 +198,11 @@ class MaskedAutoencoderViT(nn.Module):
         else:
             z_global = z
 
-        # z_global = F.normalize(z_global, dim=-1)
         z_global = (z_global - z_global.mean(0)) / (z_global.std(0) + 1e-6)
 
         c = (z_global.T @ z_global) / z_global.shape[0]
-        on_diag = torch.diagonal(c).add_(-1).pow_(2).mean()
-        off_diag = off_diagonal(c).pow_(2).mean()
+        on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+        off_diag = off_diagonal(c).pow_(2).sum()
         
         bt_loss = on_diag + self.bt_lambda * off_diag
 
@@ -190,7 +213,6 @@ class MaskedAutoencoderViT(nn.Module):
             if dist.is_initialized() and dist.get_world_size() > 1:
                 cls_feats = torch.cat(GatherLayer.apply(cls_feats), dim=0)
     
-        # cls_feats = F.normalize(cls_feats, dim=-1)
         cls_feats = (cls_feats - cls_feats.mean(0)) / (cls_feats.std(0) + 1e-5)
 
         B, D = cls_feats.shape
@@ -211,15 +233,14 @@ class MaskedAutoencoderViT(nn.Module):
                 z1_flat = torch.cat(GatherLayer.apply(z1_flat), dim=0)
                 z2_flat = torch.cat(GatherLayer.apply(z2_flat), dim=0)
 
-        z1_norm = (z1_flat - z1_flat.mean(0)) / (z1_flat.std(0) + 1e-5)
-        z2_norm = (z2_flat - z2_flat.mean(0)) / (z2_flat.std(0) + 1e-5)
+        z1_norm = (z1_flat - z1_flat.mean(0)) / (z1_flat.std(0) + 1e-6)
+        z2_norm = (z2_flat - z2_flat.mean(0)) / (z2_flat.std(0) + 1e-6)
 
         num_samples = z1_norm.shape[0]
         c = (z1_norm.T @ z2_norm) / num_samples
 
-        on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
-        
-        off_diag = (c - torch.diag(torch.diagonal(c))).pow(2).sum()
+        on_diag = torch.diagonal(c).add_(-1).pow(2).sum()
+        off_diag = off_diagonal(c).pow(2).sum()
 
         bt_loss = on_diag + self.bt_lambda * off_diag
         
@@ -234,8 +255,8 @@ class MaskedAutoencoderViT(nn.Module):
                 cls1 = torch.cat(GatherLayer.apply(cls1), dim=0)
                 cls2 = torch.cat(GatherLayer.apply(cls2), dim=0)
 
-        cls1 = (cls1 - cls1.mean(0)) / (cls1.std(0) + 1e-5)
-        cls2 = (cls2 - cls2.mean(0)) / (cls2.std(0) + 1e-5)
+        cls1 = (cls1 - cls1.mean(0)) / (cls1.std(0) + 1e-6)
+        cls2 = (cls2 - cls2.mean(0)) / (cls2.std(0) + 1e-6)
 
         B, D = cls1.shape
         c = (cls1.T @ cls2) / B
@@ -245,7 +266,61 @@ class MaskedAutoencoderViT(nn.Module):
 
         bt_loss = on_diag + self.bt_lambda * off_diag
         return bt_loss, on_diag, off_diag
+
+    def compute_spatial_bt_loss(self, latent):
+        z = latent[:, 1:, :]
+        B, K, D = z.shape
+
+        z = (z - z.mean(dim=1, keepdim=True)) / (
+            z.std(dim=1, keepdim=True) + 1e-6
+        )
+
+        G = torch.matmul(z, z.transpose(1, 2)) / D
+
+        diag = torch.diagonal(G, dim1=1, dim2=2)
+        on_diag = (diag - 1).pow(2).sum(dim=1)
+
+        off_diag = (
+            G.pow(2).sum(dim=(1, 2)) - diag.pow(2).sum(dim=1)
+        )
+
+        loss = on_diag + self.bt_lambda * off_diag
+
+        return loss.mean(), on_diag.mean(), off_diag.mean()
     
+    def compute_bt_loss_cls_cross_split(self, latent):
+        """
+        Create two global pooled embeddings from two token splits
+        (single encoder pass), and compute cross-BT between them.
+
+        latent: [B, 1+K, D]
+        """
+        latent1, latent2 = self.split_visible_tokens(latent)
+
+        tokens1 = latent1[:, 1:, :]
+        tokens2 = latent2[:, 1:, :]
+
+        cls1 = tokens1.mean(dim=1)
+        cls2 = tokens2.mean(dim=1)
+
+        if self.gather_layer:
+            if dist.is_initialized() and dist.get_world_size() > 1:
+                cls1 = torch.cat(GatherLayer.apply(cls1), dim=0)
+                cls2 = torch.cat(GatherLayer.apply(cls2), dim=0)
+
+        cls1 = (cls1 - cls1.mean(0)) / (cls1.std(0) + 1e-6)
+        cls2 = (cls2 - cls2.mean(0)) / (cls2.std(0) + 1e-6)
+
+        B, D = cls1.shape
+        c = (cls1.T @ cls2) / B
+
+        on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+        off_diag = off_diagonal(c).pow_(2).sum()
+
+        bt_loss = on_diag + self.bt_lambda * off_diag
+
+        return bt_loss, on_diag, off_diag
+
     def _get_masks(self, imgs, mask_ratio, mi_view=None, two_views=False):
         device = imgs.device
         N = imgs.size(0)
@@ -293,6 +368,12 @@ class MaskedAutoencoderViT(nn.Module):
 
         if self.bt_variant == "per_image_cross":
             return self.compute_bt_loss_cross(latent1, latent2)
+        
+        if self.bt_variant == "spatial":
+            return self.compute_spatial_bt_loss(latent1)
+        
+        if self.bt_variant == "cls_cross_split":
+            return self.compute_bt_loss_cls_cross_split(latent1)
 
         return None, None, None
 
@@ -454,7 +535,8 @@ class MaskedAutoencoderViT(nn.Module):
         return loss
 
     def forward(self, imgs, mask_ratio=0.75, mask=None, mi_view=None):
-        two_views = self.bt_variant in {"cls_cross", "per_image_cross"} and mi_view is None
+        # two_views = self.bt_variant in {"cls_cross", "per_image_cross"} and mi_view is None
+        two_views = False
 
         masks = self._get_masks(imgs, mask_ratio, mi_view=mi_view, two_views=two_views)
 
@@ -471,17 +553,28 @@ class MaskedAutoencoderViT(nn.Module):
 
         pred = self.forward_decoder(latent1, ids_restore1)
         mae_loss = self.forward_loss(imgs, pred, mask1)
+        
+        latent_bt1 = latent1
+        latent_bt2 = None
+
+        if mi_view is None and self.bt_variant in {
+            "per_image_cross",
+            "cls_cross",
+        }:
+            latent_bt1, latent_bt2 = self.split_visible_tokens(latent1)
 
         if self.global_pool:
-            cls1 = latent1[:, 1:, :].mean(dim=1)
+            cls1 = latent_bt1[:, 1:, :].mean(dim=1)
             cls1 = self.fc_norm(cls1)
+
             cls2 = (
-                self.fc_norm(latent2[:, 1:, :].mean(dim=1))
-                if latent2 is not None else None
+                self.fc_norm(latent_bt2[:, 1:, :].mean(dim=1))
+                if latent_bt2 is not None
+                else None
             )
         else:
-            cls1 = latent1[:, 0]
-            cls2 = latent2[:, 0] if latent2 is not None else None
+            cls1 = latent_bt1[:, 0]
+            cls2 = latent_bt2[:, 0] if latent_bt2 is not None else None
 
         outputs = self.fc(cls1.detach())
 
@@ -490,7 +583,7 @@ class MaskedAutoencoderViT(nn.Module):
         off_diag = None
         if mi_view is None:
             bt_loss, on_diag, off_diag = self._compute_bt(
-                latent1, latent2, cls1, cls2
+                latent_bt1, latent_bt2, cls1, cls2
             )
 
         total_loss = mae_loss + (self.bt_weight * bt_loss if bt_loss is not None else 0.0)

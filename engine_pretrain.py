@@ -23,6 +23,16 @@ import torch.distributed as dist
 from loss_func import uniformity_loss
 
 
+def bt_coeff_ramp(epoch, max_epoch):
+    """
+    Linearly ramps from 0 → 1 over first half of training.
+    """
+    mid = max_epoch // 2
+    if epoch >= mid:
+        return 1.0
+    return epoch / float(mid)
+
+
   
 def train_one_epoch(model: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,

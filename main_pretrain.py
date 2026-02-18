@@ -206,8 +206,8 @@ def main(args):
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
     
     if args.use_hf_dataset:
-        ds_train_train = load_dataset("ilee0022/ImageNet100", split='train', cache_dir="/home/jovyan/shares/SR004.nfs2/aitsybina/data")
-        ds_train_val = load_dataset("ilee0022/ImageNet100", split='validation', cache_dir="/home/jovyan/shares/SR004.nfs2/aitsybina/data")
+        ds_train_train = load_dataset("ilee0022/ImageNet100", split='train', cache_dir="/home/jovyan/shares/SR006.nfs2/aitsybina/data")
+        ds_train_val = load_dataset("ilee0022/ImageNet100", split='validation', cache_dir="/home/jovyan/shares/SR006.nfs2/aitsybina/data")
         
         ds_train = concatenate_datasets([ds_train_train, ds_train_val])
         ds_val = load_dataset("ilee0022/ImageNet100", split='test')
@@ -215,8 +215,18 @@ def main(args):
         dataset_train = HuggingFaceDataset(ds_train, transform=transform_train)
         dataset_val = HuggingFaceDataset(ds_val, transform=transform_val)
     else:
-        dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
-        dataset_val = datasets.ImageFolder(os.path.join(args.data_path, 'val'), transform=transform_val)
+        from torch.utils.data import ConcatDataset
+        train_folders = ['train.X1', 'train.X2', 'train.X3', 'train.X4']
+        datasets_list = []
+        for folder in train_folders:
+            folder_path = os.path.join(args.data_path, folder)
+            if os.path.exists(folder_path): 
+                dataset = datasets.ImageFolder(folder_path, transform=transform_train)
+                datasets_list.append(dataset)
+
+        dataset_train = ConcatDataset(datasets_list)
+        #dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train.X1'), transform=transform_train)
+        dataset_val = datasets.ImageFolder(os.path.join(args.data_path, 'val.X'), transform=transform_val)
     print(dataset_train)
     print(dataset_val)
 
@@ -344,13 +354,13 @@ def main(args):
             log_writer=log_writer,
             args=args
         )
-        if args.output_dir and epoch + 1 == args.epochs and (epoch % 20 == 0 or epoch + 1 == args.epochs):
+        if args.output_dir and epoch + 1 == args.epochs:
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)
 
         if epoch % args.val_interval == 0:
-            test_stats = evaluate(data_loader_val, model, device, is_pretrain=True)
+            test_stats = evaluate(data_loader_val, model, device)#, is_pretrain=True
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         max_accuracy = max(max_accuracy, test_stats["acc1"])
         print(f'Max accuracy: {max_accuracy:.2f}%')
